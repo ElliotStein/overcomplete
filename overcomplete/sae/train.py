@@ -11,6 +11,8 @@ from einops import rearrange
 from ..metrics import l2, r2_score, l0_eps
 from .trackers import DeadCodeTracker
 
+import wandb
+
 
 def extract_input(batch):
     """
@@ -63,7 +65,7 @@ def _compute_reconstruction_error(x, x_hat):
     return r2.item()
 
 
-def _log_metrics(monitoring, logs, model, z, loss, optimizer):
+def _log_metrics_batch(monitoring, logs, model, z, loss, optimizer):
     """
     Log training metrics for the current training step.
 
@@ -105,7 +107,7 @@ def _log_metrics(monitoring, logs, model, z, loss, optimizer):
 
 
 def train_sae(model, dataloader, criterion, optimizer, scheduler=None,
-              nb_epochs=20, clip_grad=1.0, monitoring=1, device="cpu"):
+              nb_epochs=20, clip_grad=1.0, monitoring=1, device="cpu", wandb_log=False):
     """
     Train a Sparse Autoencoder (SAE) model.
 
@@ -133,7 +135,8 @@ def train_sae(model, dataloader, criterion, optimizer, scheduler=None,
         By default 1.
     device : str, optional
         Device to run the training on, by default 'cpu'.
-
+    wandb_log : bool, optional
+        Whether to log training statistics to Weights & Biases, by default False.
     Returns
     -------
     defaultdict
@@ -179,7 +182,14 @@ def train_sae(model, dataloader, criterion, optimizer, scheduler=None,
                 epoch_loss += loss.item()
                 epoch_error += _compute_reconstruction_error(x, x_hat)
                 epoch_sparsity += l0_eps(z, 0).sum().item()
-                _log_metrics(monitoring, logs, model, z, loss, optimizer)
+                _log_metrics_batch(monitoring, logs, model, z, loss, optimizer)
+
+                if wandb_log:
+                    wandb.log({
+                        "train/loss": loss.item(),
+                        "train/step_loss": loss.item(),
+                        "train/lr": optimizer.param_groups[0]['lr'],
+                    }, step=epoch * len(dataloader) + batch_count)
 
         if monitoring and batch_count > 0:
             avg_loss = epoch_loss / batch_count
@@ -198,13 +208,22 @@ def train_sae(model, dataloader, criterion, optimizer, scheduler=None,
                   f"R2: {avg_error:.4f}, L0: {avg_sparsity:.4f}, "
                   f"Dead Features: {dead_ratio*100:.1f}%, "
                   f"Time: {epoch_duration:.4f} seconds")
+            
+            if wandb_log:
+                wandb.log({
+                    "train/loss": avg_loss,
+                    "train/r2": avg_error,
+                    "train/z_sparsity": avg_sparsity,
+                    "train/dead_features": dead_ratio,
+                    "train/time_epoch": epoch_duration,
+                }, step=epoch * len(dataloader) + batch_count)
 
     return logs
 
 
 def train_sae_amp(model, dataloader, criterion, optimizer, scheduler=None,
                   nb_epochs=20, clip_grad=1.0, monitoring=1, device="cuda",
-                  max_nan_fallbacks=5):
+                  max_nan_fallbacks=5, wandb_log=False):
     """
     Train a Sparse Autoencoder (SAE) model with AMP and NaN fallback.
     Training in fp16 with AMP and fallback to fp32 for the rest of the current
@@ -237,6 +256,8 @@ def train_sae_amp(model, dataloader, criterion, optimizer, scheduler=None,
         Device to run the training on, by default 'cuda'.
     max_nan_fallbacks : int, optional
         Maximum number of NaN fallbacks per epoch before disabling AMP, by default 5.
+    wandb_log : bool, optional
+        Whether to log training statistics to Weights & Biases, by default False.
 
     Returns
     -------
@@ -312,7 +333,7 @@ def train_sae_amp(model, dataloader, criterion, optimizer, scheduler=None,
                 epoch_loss += loss.item()
                 epoch_error += _compute_reconstruction_error(x, x_hat)
                 epoch_sparsity += l0_eps(z, 0).sum().item()
-                _log_metrics(monitoring, logs, model, z, loss, optimizer)
+                _log_metrics_batch(monitoring, logs, model, z, loss, optimizer)
 
         if monitoring and batch_count > 0:
             avg_loss = epoch_loss / batch_count
@@ -332,5 +353,13 @@ def train_sae_amp(model, dataloader, criterion, optimizer, scheduler=None,
                   f"R2: {avg_error:.4f}, L0: {avg_sparsity:.4f}, "
                   f"Dead Features: {dead_ratio*100:.1f}%, "
                   f"Time: {epoch_duration:.4f} seconds")
-
+            if wandb_log:
+                wandb.log({
+                    "train/loss": avg_loss,
+                    "train/r2": avg_error,
+                    "train/z_sparsity": avg_sparsity,
+                    "train/dead_features": dead_ratio,
+                    "train/time_epoch": epoch_duration,
+                    "train/epoch_nan_fallbacks": nan_fallback_count,
+                }, step=epoch)
     return logs
